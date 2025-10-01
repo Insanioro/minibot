@@ -26,17 +26,26 @@ class TelegramBot:
         self.approved_users: Set[str] = set()  # множество одобренных пользователей
         self.config = self.load_config()
         
-        # Статистика
-        self.stats = {
-            'hourly_requests': 0,  # заявки за текущий час
-            'hourly_left': 0,      # отписавшиеся за текущий час
-            'daily_requests': 0,   # заявки за 8 часов
-            'daily_left': 0,       # отписавшиеся за 8 часов
-            'total_requests': 0,   # всего заявок
-            'total_approved': 0,   # всего одобрено
-            'total_left': 0        # всего отписалось
-        }
+        # Статистика по каналам/группам
+        self.channel_stats = {}  # chat_id -> статистика канала
         self.tracked_groups = set()  # множество отслеживаемых групп
+        
+        # Глобальная статистика (сумма по всем каналам)
+        self.global_stats = {
+            'hourly_requests': 0,
+            'hourly_left': 0,
+            'daily_requests': 0,
+            'daily_left': 0,
+            'total_requests': 0,
+            'total_approved': 0,
+            'total_left': 0
+        }
+        
+        # Загружаем сохраненную статистику
+        self.load_stats_from_file()
+        
+        # Загружаем статистику из файла при старте
+        self.load_stats_from_file()
         
     def load_config(self) -> Dict:
         """Загружает конфигурацию из файла config.json"""
@@ -61,17 +70,19 @@ class TelegramBot:
         chat_id = str(request.chat.id)
         chat_type = request.chat.type
         
-        logger.info(f"Получена заявка от пользователя {request.from_user.first_name} ({user_id}) в чат {chat_id} (тип: {chat_type})")
+        chat_title = request.chat.title or f"Чат {chat_id}"
+        logger.info(f"Получена заявка от пользователя {request.from_user.first_name} ({user_id}) в чат '{chat_title}' ({chat_id}, тип: {chat_type})")
         
         # Проверяем тип чата
         if chat_type not in [ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL]:
             logger.warning(f"Неподдерживаемый тип чата: {chat_type}")
             return
         
-        # Обновляем статистику
-        self.stats['hourly_requests'] += 1
-        self.stats['daily_requests'] += 1
-        self.stats['total_requests'] += 1
+        # Обновляем статистику для конкретного канала
+        self.get_or_create_channel_stats(chat_id, chat_title)
+        self.update_channel_stats(chat_id, 'hourly_requests')
+        self.update_channel_stats(chat_id, 'daily_requests')
+        self.update_channel_stats(chat_id, 'total_requests')
         
         # Добавляем группу в отслеживаемые
         self.tracked_groups.add(chat_id)
@@ -132,8 +143,8 @@ class TelegramBot:
             
             logger.info(f"Автоматически одобрена заявка пользователя {user_data['user_data']['first_name']} ({user_id})")
             
-            # Обновляем статистику одобренных
-            self.stats['total_approved'] += 1
+            # Обновляем статистику одобренных для конкретного канала
+            self.update_channel_stats(chat_id, 'total_approved')
             
 
             
@@ -170,10 +181,14 @@ class TelegramBot:
         elif (old_status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR] and 
               new_status in [ChatMember.LEFT, ChatMember.KICKED]):
             
-            self.stats['hourly_left'] += 1
-            self.stats['daily_left'] += 1
-            self.stats['total_left'] += 1
-            logger.info(f"Пользователь {chat_member_update.new_chat_member.user.first_name} ({user_id}) покинул чат {chat_type}")
+            # Обновляем статистику покинувших для конкретного канала
+            chat_title = update.effective_chat.title or f"Чат {chat_id}"
+            self.get_or_create_channel_stats(chat_id, chat_title)
+            self.update_channel_stats(chat_id, 'hourly_left')
+            self.update_channel_stats(chat_id, 'daily_left')
+            self.update_channel_stats(chat_id, 'total_left')
+            
+            logger.info(f"Пользователь {chat_member_update.new_chat_member.user.first_name} ({user_id}) покинул чат '{chat_title}' ({chat_type})")
     
     async def send_welcome_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user):
         """Отправляет приветственное сообщение новому участнику"""
@@ -254,44 +269,105 @@ class TelegramBot:
 
     async def send_hourly_stats(self, context: ContextTypes.DEFAULT_TYPE):
         """Отправляет почасовую статистику администраторам"""
-        if self.stats['hourly_requests'] == 0 and self.stats['hourly_left'] == 0:
+        # Проверяем есть ли активность
+        total_requests = sum(stats['hourly_requests'] for stats in self.channel_stats.values())
+        total_left = sum(stats['hourly_left'] for stats in self.channel_stats.values())
+        
+        if total_requests == 0 and total_left == 0:
             return  # Не отправляем пустую статистику
         
         current_time = datetime.now().strftime("%H:%M")
-        stats_message = (
-            f"📊 Статистика за последний час ({current_time}):\n"
-            f"📈 Новых заявок: {self.stats['hourly_requests']}\n"
-            f"📉 Покинули группу: {self.stats['hourly_left']}\n"
-            f"➖➖➖➖➖➖➖➖➖➖\n"
-            f"🔄 Прирост: {self.stats['hourly_requests'] - self.stats['hourly_left']}"
+        
+        # Глобальная статистика
+        global_message = (
+            f"📊 Общая статистика за час ({current_time}):\n"
+            f"📈 Новых заявок: {total_requests}\n"
+            f"📉 Покинули: {total_left}\n"
+            f"🔄 Чистый прирост: {total_requests - total_left}\n\n"
         )
+        
+        # Статистика по каналам
+        channel_details = []
+        for chat_id, stats in self.channel_stats.items():
+            if stats['hourly_requests'] > 0 or stats['hourly_left'] > 0:
+                channel_growth = stats['hourly_requests'] - stats['hourly_left']
+                growth_emoji = "📈" if channel_growth > 0 else "📉" if channel_growth < 0 else "➖"
+                
+                channel_details.append(
+                    f"🏷️ {stats['title'][:30]}:\n"
+                    f"  � Заявок: {stats['hourly_requests']}\n"
+                    f"  👋 Покинули: {stats['hourly_left']}\n"
+                    f"  {growth_emoji} Прирост: {channel_growth}"
+                )
+        
+        if channel_details:
+            stats_message = global_message + "📋 По каналам:\n" + "\n\n".join(channel_details)
+        else:
+            stats_message = global_message.rstrip()
         
         await self.send_stats_to_admins(context, stats_message)
         
         # Сбрасываем почасовую статистику
-        self.stats['hourly_requests'] = 0
-        self.stats['hourly_left'] = 0
+        for stats in self.channel_stats.values():
+            stats['hourly_requests'] = 0
+            stats['hourly_left'] = 0
+        self.global_stats['hourly_requests'] = 0
+        self.global_stats['hourly_left'] = 0
     
     async def send_daily_stats(self, context: ContextTypes.DEFAULT_TYPE):
         """Отправляет статистику за 8 часов администраторам"""
         current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
-        stats_message = (
-            f"📈 Статистика за последние 8 часов ({current_time}):\n\n"
-            f"📝 Новых заявок: {self.stats['daily_requests']}\n"
-            f"✅ Одобрено: {self.stats['total_approved']}\n"
-            f"👋 Покинули группу: {self.stats['daily_left']}\n"
-            f"🔄 Чистый прирост: {self.stats['daily_requests'] - self.stats['daily_left']}\n\n"
-            f"📊 Общая статистика:\n"
-            f"📋 Всего заявок: {self.stats['total_requests']}\n"
-            f"✅ Всего одобрено: {self.stats['total_approved']}\n"
-            f"👋 Всего покинуло: {self.stats['total_left']}"
+        
+        # Глобальная статистика за 8 часов
+        total_daily_requests = sum(stats['daily_requests'] for stats in self.channel_stats.values())
+        total_daily_left = sum(stats['daily_left'] for stats in self.channel_stats.values())
+        total_approved = sum(stats['total_approved'] for stats in self.channel_stats.values())
+        total_requests = sum(stats['total_requests'] for stats in self.channel_stats.values())
+        total_left = sum(stats['total_left'] for stats in self.channel_stats.values())
+        
+        global_message = (
+            f"📈 Общий отчет за 8 часов ({current_time}):\n\n"
+            f"📝 Новых заявок: {total_daily_requests}\n"
+            f"✅ Одобрено: {total_approved}\n"
+            f"👋 Покинули: {total_daily_left}\n"
+            f"🔄 Чистый прирост: {total_daily_requests - total_daily_left}\n\n"
+            f"📊 Общая статистика с запуска:\n"
+            f"📋 Всего заявок: {total_requests}\n"
+            f"✅ Всего одобрено: {total_approved}\n"
+            f"👋 Всего покинуло: {total_left}\n\n"
         )
+        
+        # Детальная статистика по каналам
+        channel_details = []
+        for chat_id, stats in self.channel_stats.items():
+            if stats['total_requests'] > 0 or stats['total_left'] > 0:
+                daily_growth = stats['daily_requests'] - stats['daily_left']
+                total_growth = stats['total_requests'] - stats['total_left']
+                
+                daily_emoji = "📈" if daily_growth > 0 else "📉" if daily_growth < 0 else "➖"
+                total_emoji = "📈" if total_growth > 0 else "📉" if total_growth < 0 else "➖"
+                
+                channel_details.append(
+                    f"🏷️ {stats['title'][:35]}:\n"
+                    f"  � За 8 часов: {stats['daily_requests']} заявок, {stats['daily_left']} покинули\n"
+                    f"  {daily_emoji} Прирост за 8ч: {daily_growth}\n"
+                    f"  📊 Всего: {stats['total_requests']} заявок, {stats['total_approved']} одобрено\n"
+                    f"  {total_emoji} Общий прирост: {total_growth}"
+                )
+        
+        if channel_details:
+            stats_message = global_message + "📋 Детализация по каналам:\n\n" + "\n\n".join(channel_details)
+        else:
+            stats_message = global_message.rstrip()
         
         await self.send_stats_to_admins(context, stats_message)
         
         # Сбрасываем дневную статистику
-        self.stats['daily_requests'] = 0
-        self.stats['daily_left'] = 0
+        for stats in self.channel_stats.values():
+            stats['daily_requests'] = 0
+            stats['daily_left'] = 0
+        self.global_stats['daily_requests'] = 0
+        self.global_stats['daily_left'] = 0
     
     async def send_stats_to_admins(self, context: ContextTypes.DEFAULT_TYPE, message: str):
         """Отправляет статистику всем администраторам всех отслеживаемых групп"""
@@ -340,6 +416,59 @@ class TelegramBot:
             except Exception as e:
                 logger.error(f"Ошибка при получении админов для чата {chat_id}: {e}")
     
+    def save_stats_to_file(self):
+        """Сохраняет статистику в файл"""
+        try:
+            stats_data = {
+                'channel_stats': {},
+                'global_stats': self.global_stats,
+                'tracked_groups': list(self.tracked_groups),
+                'last_saved': datetime.now().isoformat()
+            }
+            
+            # Конвертируем datetime в строки для JSON
+            for chat_id, stats in self.channel_stats.items():
+                stats_copy = stats.copy()
+                if 'last_activity' in stats_copy:
+                    stats_copy['last_activity'] = stats_copy['last_activity'].isoformat()
+                stats_data['channel_stats'][chat_id] = stats_copy
+            
+            with open('bot_stats.json', 'w', encoding='utf-8') as f:
+                json.dump(stats_data, f, ensure_ascii=False, indent=2)
+            
+            logger.info("Статистика сохранена в файл")
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении статистики: {e}")
+    
+    def load_stats_from_file(self):
+        """Загружает статистику из файла"""
+        try:
+            with open('bot_stats.json', 'r', encoding='utf-8') as f:
+                stats_data = json.load(f)
+            
+            # Загружаем данные
+            self.global_stats = stats_data.get('global_stats', self.global_stats)
+            self.tracked_groups = set(stats_data.get('tracked_groups', []))
+            
+            # Загружаем статистику каналов
+            for chat_id, stats in stats_data.get('channel_stats', {}).items():
+                if 'last_activity' in stats and isinstance(stats['last_activity'], str):
+                    try:
+                        stats['last_activity'] = datetime.fromisoformat(stats['last_activity'])
+                    except:
+                        stats['last_activity'] = datetime.now()
+                self.channel_stats[chat_id] = stats
+            
+            logger.info(f"Загружена статистика для {len(self.channel_stats)} каналов")
+        except FileNotFoundError:
+            logger.info("Файл статистики не найден, начинаем с пустой статистики")
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке статистики: {e}")
+    
+    async def periodic_save_stats(self, context: ContextTypes.DEFAULT_TYPE):
+        """Периодически сохраняет статистику"""
+        self.save_stats_to_file()
+
     async def setup_periodic_tasks(self, context: ContextTypes.DEFAULT_TYPE):
         """Настраивает периодические задачи для статистики"""
         if context.job_queue is not None:
@@ -359,9 +488,84 @@ class TelegramBot:
                 name="daily_stats"
             )
             
+            # Периодическое сохранение статистики
+            context.job_queue.run_repeating(
+                self.periodic_save_stats,
+                interval=3600,  # каждые 60 минут
+                first=3600,     # первое сохранение через 60 минут
+                name="save_stats"
+            )
+            
             logger.info("Настроены периодические задачи для статистики")
         else:
             logger.error("JobQueue не настроен для периодических задач!")
+
+    async def handle_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обрабатывает команду /stats для получения текущей статистики"""
+        if not update.message:
+            return
+            
+        user_id = update.effective_user.id
+        
+        # Проверяем, является ли пользователь администратором хотя бы одного канала
+        is_admin = False
+        for chat_id in self.tracked_groups:
+            try:
+                chat_admins = await context.bot.get_chat_administrators(int(chat_id))
+                if any(admin.user.id == user_id and not admin.user.is_bot for admin in chat_admins):
+                    is_admin = True
+                    break
+            except Exception:
+                continue
+        
+        if not is_admin:
+            await update.message.reply_text("❌ У вас нет прав для просмотра статистики")
+            return
+        
+        # Формируем сообщение со статистикой
+        current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+        
+        if not self.channel_stats:
+            await update.message.reply_text("📊 Статистика пуста - бот еще не обрабатывал заявки")
+            return
+        
+        # Общая статистика
+        total_requests = sum(stats['total_requests'] for stats in self.channel_stats.values())
+        total_approved = sum(stats['total_approved'] for stats in self.channel_stats.values())
+        total_left = sum(stats['total_left'] for stats in self.channel_stats.values())
+        
+        message = (
+            f"📊 Текущая статистика ({current_time}):\n\n"
+            f"🌐 ОБЩАЯ СТАТИСТИКА:\n"
+            f"📋 Всего заявок: {total_requests}\n"
+            f"✅ Одобрено: {total_approved}\n"
+            f"👋 Покинули: {total_left}\n"
+            f"🔄 Общий прирост: {total_requests - total_left}\n\n"
+        )
+        
+        # Статистика по каналам
+        active_channels = [(chat_id, stats) for chat_id, stats in self.channel_stats.items() 
+                          if stats['total_requests'] > 0 or stats['total_left'] > 0]
+        
+        if active_channels:
+            message += "📋 ПО КАНАЛАМ:\n"
+            for i, (chat_id, stats) in enumerate(active_channels, 1):
+                growth = stats['total_requests'] - stats['total_left']
+                growth_emoji = "📈" if growth > 0 else "📉" if growth < 0 else "➖"
+                
+                message += (
+                    f"\n{i}. 🏷️ {stats['title'][:30]}:\n"
+                    f"   📥 Заявок: {stats['total_requests']}\n"
+                    f"   ✅ Одобрено: {stats['total_approved']}\n"
+                    f"   👋 Покинули: {stats['total_left']}\n"
+                    f"   {growth_emoji} Прирост: {growth}\n"
+                )
+        
+        try:
+            await update.message.reply_text(message)
+        except Exception as e:
+            logger.error(f"Ошибка при отправке статистики: {e}")
+            await update.message.reply_text("❌ Ошибка при получении статистики")
 
     def run(self):
         """Запускает бота"""
@@ -376,6 +580,7 @@ class TelegramBot:
         )
         
         # Регистрируем обработчики
+        application.add_handler(CommandHandler("stats", self.handle_stats_command))
         application.add_handler(ChatJoinRequestHandler(self.handle_chat_join_request))
         application.add_handler(ChatMemberHandler(self.handle_chat_member_update))
         
@@ -387,7 +592,9 @@ class TelegramBot:
         
         # Настраиваем graceful shutdown
         def signal_handler(signum, frame):
-            logger.info("Получен сигнал завершения, останавливаем бота...")
+            logger.info("Получен сигнал завершения, сохраняем статистику...")
+            self.save_stats_to_file()
+            logger.info("Останавливаем бота...")
             application.stop()
             sys.exit(0)
         
