@@ -8,7 +8,7 @@ import os
 from telegram import Update, ChatMemberUpdated, ChatMember, Chat
 from telegram.ext import Application, ChatJoinRequestHandler, ChatMemberHandler, ContextTypes, CommandHandler
 from telegram.constants import ChatAction, ParseMode, ChatType
-from telegram.error import BadRequest, Forbidden
+from telegram.error import BadRequest, Forbidden, TimedOut, NetworkError, Conflict
 import signal
 import sys
 
@@ -261,6 +261,32 @@ class TelegramBot:
         except Exception as e:
             logger.error(f"Ошибка при уведомлении администраторов: {e}")
     
+    def get_or_create_channel_stats(self, chat_id: str, chat_title: str):
+        """Создает или возвращает статистику для канала"""
+        if chat_id not in self.channel_stats:
+            self.channel_stats[chat_id] = {
+                'title': chat_title,
+                'hourly_requests': 0,
+                'hourly_left': 0,
+                'daily_requests': 0,
+                'daily_left': 0,
+                'total_requests': 0,
+                'total_approved': 0,
+                'total_left': 0,
+                'last_activity': datetime.now()
+            }
+            logger.info(f"Создана статистика для канала '{chat_title}' ({chat_id})")
+        return self.channel_stats[chat_id]
+    
+    def update_channel_stats(self, chat_id: str, stat_type: str):
+        """Обновляет статистику канала"""
+        if chat_id in self.channel_stats:
+            self.channel_stats[chat_id][stat_type] += 1
+            self.channel_stats[chat_id]['last_activity'] = datetime.now()
+            
+            # Обновляем глобальную статистику
+            if stat_type in self.global_stats:
+                self.global_stats[stat_type] += 1
 
 
 
@@ -601,15 +627,90 @@ class TelegramBot:
         logger.info("Бот запущен и готов к работе!")
         logger.info(f"Отслеживаемые типы обновлений: заявки на вступление, изменения участников")
         
-        # Запускаем бота
+        # Определяем режим работы
+        is_production = os.getenv('RENDER') == 'true' or os.getenv('PRODUCTION') == 'true'
+        
+        if is_production:
+            # В production используем webhook
+            self.run_webhook(application)
+        else:
+            # В development используем polling
+            self.run_polling(application)
+    
+    def run_webhook(self, application):
+        """Запуск через webhook (для production)"""
+        webhook_url = os.getenv('WEBHOOK_URL')
+        port = int(os.getenv('PORT', 8000))
+        
+        if not webhook_url:
+            logger.error("❌ WEBHOOK_URL не установлен для production режима!")
+            logger.error("💡 Установите переменную WEBHOOK_URL в настройках Render")
+            return
+        
+        # Формируем полный URL для webhook
+        webhook_path = f"/{self.token}"
+        full_webhook_url = f"{webhook_url.rstrip('/')}{webhook_path}"
+        
+        logger.info(f"🌐 Запуск бота в webhook режиме")
+        logger.info(f"🔗 Webhook URL: {full_webhook_url}")
+        logger.info(f"🔌 Port: {port}")
+        
         try:
-            application.run_polling(
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                url_path=webhook_path,
+                webhook_url=full_webhook_url,
                 allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True  # Игнорируем старые обновления при перезапуске
+                drop_pending_updates=True
             )
         except Exception as e:
-            logger.error(f"Критическая ошибка при запуске бота: {e}")
+            logger.error(f"💥 Ошибка webhook: {e}")
             raise
+    
+    def run_polling(self, application):
+        """Запуск через polling (для development)"""
+        logger.info("🔄 Запуск бота в polling режиме (для разработки)")
+        
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                application.run_polling(
+                    allowed_updates=Update.ALL_TYPES,
+                    drop_pending_updates=True  # Игнорируем старые обновления при перезапуске
+                )
+                break  # Если polling запустился успешно, выходим из цикла
+                
+            except Conflict as e:
+                retry_count += 1
+                logger.error(f"⚠️ Конфликт polling (попытка {retry_count}/{max_retries}): {e}")
+                
+                if retry_count < max_retries:
+                    logger.info(f"⏳ Ожидание {retry_count * 5} секунд перед повторной попыткой...")
+                    asyncio.run(asyncio.sleep(retry_count * 5))
+                else:
+                    logger.error("❌ Не удалось запустить polling после всех попыток!")
+                    logger.error("💡 Возможные причины:")
+                    logger.error("   - Бот уже запущен в другом месте (локально или на Render)")
+                    logger.error("   - Используйте webhook для production или остановите другие экземпляры")
+                    raise
+                    
+            except (TimedOut, NetworkError) as e:
+                retry_count += 1
+                logger.error(f"🌐 Сетевая ошибка (попытка {retry_count}/{max_retries}): {e}")
+                
+                if retry_count < max_retries:
+                    logger.info(f"⏳ Ожидание {retry_count * 3} секунд перед повторной попыткой...")
+                    asyncio.run(asyncio.sleep(retry_count * 3))
+                else:
+                    logger.error("❌ Не удалось подключиться после всех попыток!")
+                    raise
+                    
+            except Exception as e:
+                logger.error(f"💥 Критическая ошибка при запуске бота: {e}")
+                raise
 
 def main():
     # Получаем токен бота из переменной окружения или файла

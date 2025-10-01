@@ -26,7 +26,12 @@ python bot.py
 В разделе **Environment Variables** добавьте:
 
 - `TELEGRAM_BOT_TOKEN` = ваш токен от @BotFather
-- `PYTHON_VERSION` = 3.11
+- `PRODUCTION` = `true`
+- `WEBHOOK_URL` = `https://your-app-name.onrender.com` (замените your-app-name на имя вашего сервиса)
+- `PORT` = `8000`
+- `PYTHON_VERSION` = `3.11`
+
+⚠️ **ВАЖНО**: Замените `your-app-name` в `WEBHOOK_URL` на реальное имя вашего сервиса Render!
 
 ### 4. Настройки
 
@@ -65,3 +70,44 @@ python bot.py
 ✅ Публичные группы  
 ✅ Супергруппы
 ✅ Каналы (только для статистики)
+
+## Решение проблем
+
+### Ошибка "Conflict: terminated by other getUpdates request"
+
+Эта ошибка возникает, когда одновременно запущено несколько экземпляров бота:
+
+**Решение:**
+1. **Остановите локальный бот** если он запущен
+2. **Проверьте Render** - только один сервис должен работать
+3. **Используйте разные режимы**:
+   - Локально: polling (автоматически)
+   - Render: webhook (через переменные окружения)
+
+### Режимы работы
+
+**Development (локально):**
+- Использует polling
+- Не требует webhook
+- `.env` файл без `PRODUCTION=true`
+
+**Production (Render):**
+- Использует webhook  
+- Требует `WEBHOOK_URL`
+- Переменная `PRODUCTION=true`
+
+### Проверка статуса
+
+```bash
+# Проверить работает ли бот
+curl https://api.telegram.org/bot<YOUR_TOKEN>/getMe
+
+# Проверить webhook
+curl https://api.telegram.org/bot<YOUR_TOKEN>/getWebhookInfo
+```
+
+### Очистка webhook (если нужно)
+
+```bash
+curl -X POST https://api.telegram.org/bot<YOUR_TOKEN>/deleteWebhook
+```
