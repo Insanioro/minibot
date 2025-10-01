@@ -22,13 +22,15 @@ PORT = 8000
 
 ## Пример заполнения:
 
-Если ваше приложение называется `my-telegram-bot`, то:
+**Для вашего сервиса `minibot-entx`:**
 ```
-TELEGRAM_BOT_TOKEN = 6123456789:AAEhBOweik6ad6PsY_CphdD_nN-9Z9_rG2o
+TELEGRAM_BOT_TOKEN = ваш_реальный_токен_от_BotFather
 PRODUCTION = true
-WEBHOOK_URL = https://my-telegram-bot.onrender.com
+WEBHOOK_URL = https://minibot-entx.onrender.com
 PORT = 8000
 ```
+
+Если у вас другое имя приложения, замените в `WEBHOOK_URL`.
 
 ## ✅ Проверка корректности:
 После настройки запустите: `python check_bot.py`
