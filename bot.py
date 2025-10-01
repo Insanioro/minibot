@@ -44,9 +44,6 @@ class TelegramBot:
         # Загружаем сохраненную статистику
         self.load_stats_from_file()
         
-        # Загружаем статистику из файла при старте
-        self.load_stats_from_file()
-        
     def load_config(self) -> Dict:
         """Загружает конфигурацию из файла config.json"""
         try:
