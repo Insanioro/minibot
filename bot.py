@@ -255,8 +255,11 @@ class TelegramBot:
                             chat_id=admin.user.id,
                             text=admin_message
                         )
+                        logger.info(f"✅ Уведомление отправлено админу {admin.user.first_name} ({admin.user.id})")
+                    except Forbidden:
+                        logger.info(f"ℹ️ Админ {admin.user.first_name} ({admin.user.id}) не начал диалог с ботом - уведомление пропущено")
                     except Exception as e:
-                        logger.warning(f"Не удалось отправить уведомление админу {admin.user.id}: {e}")
+                        logger.warning(f"⚠️ Ошибка отправки уведомления админу {admin.user.id}: {e}")
                         
         except Exception as e:
             logger.error(f"Ошибка при уведомлении администраторов: {e}")
@@ -423,14 +426,16 @@ class TelegramBot:
                         try:
                             await context.bot.send_message(
                                 chat_id=admin.user.id,
-                                text=message
+                                text=message  
                             )
                             sent_to_admins.add(admin.user.id)
-                            logger.info(f"Отправлена статистика админу {admin.user.id} из {chat_type}")
-                        except (BadRequest, Forbidden) as e:
-                            logger.warning(f"Не удалось отправить статистику админу {admin.user.id}: {e}")
+                            logger.info(f"✅ Статистика отправлена админу {admin.user.first_name} ({admin.user.id})")
+                        except Forbidden:
+                            logger.info(f"ℹ️ Админ {admin.user.first_name} ({admin.user.id}) не начал диалог с ботом - статистика пропущена")
+                        except BadRequest as e:
+                            logger.warning(f"⚠️ BadRequest при отправке статистики админу {admin.user.id}: {e}")
                         except Exception as e:
-                            logger.error(f"Неожиданная ошибка при отправке статистики админу {admin.user.id}: {e}")
+                            logger.error(f"❌ Неожиданная ошибка при отправке статистики админу {admin.user.id}: {e}")
                             
             except (BadRequest, Forbidden) as e:
                 logger.warning(f"Нет доступа к чату {chat_id}: {e}")
