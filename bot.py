@@ -590,6 +590,26 @@ class TelegramBot:
             logger.error(f"Ошибка при отправке статистики: {e}")
             await update.message.reply_text("❌ Ошибка при получении статистики")
 
+    async def handle_any_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обрабатывает любые входящие обновления для диагностики"""
+        try:
+            update_info = []
+            
+            if update.message:
+                update_info.append(f"📨 Сообщение от {update.message.from_user.first_name}")
+            if update.chat_join_request:
+                update_info.append(f"📝 Заявка на вступление от {update.chat_join_request.from_user.first_name}")
+            if update.chat_member:
+                update_info.append(f"👥 Изменение участника: {update.chat_member.new_chat_member.user.first_name}")
+            
+            if update_info:
+                logger.info(f"🔔 Получено обновление: {', '.join(update_info)}")
+            else:
+                logger.info(f"🔔 Получено обновление типа: {type(update)}")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка в handle_any_update: {e}")
+
     def run(self):
         """Запускает бота"""
         # Создаем приложение с JobQueue
@@ -606,6 +626,10 @@ class TelegramBot:
         application.add_handler(CommandHandler("stats", self.handle_stats_command))
         application.add_handler(ChatJoinRequestHandler(self.handle_chat_join_request))
         application.add_handler(ChatMemberHandler(self.handle_chat_member_update))
+        
+        # Добавляем простой обработчик для проверки работы webhook
+        from telegram.ext import MessageHandler, filters
+        application.add_handler(MessageHandler(filters.ALL, self.handle_any_update))
         
         # Настраиваем периодические задачи для статистики
         application.job_queue.run_once(
@@ -627,8 +651,18 @@ class TelegramBot:
         logger.info("Бот запущен и готов к работе!")
         logger.info(f"Отслеживаемые типы обновлений: заявки на вступление, изменения участников")
         
+        # Проверяем переменные окружения для диагностики
+        webhook_url = os.getenv('WEBHOOK_URL')
+        production = os.getenv('PRODUCTION')
+        render = os.getenv('RENDER')
+        
+        logger.info(f"🔍 Диагностика переменных окружения:")
+        logger.info(f"   PRODUCTION = {production}")
+        logger.info(f"   RENDER = {render}")
+        logger.info(f"   WEBHOOK_URL = {webhook_url}")
+        
         # Определяем режим работы
-        is_production = os.getenv('RENDER') == 'true' or os.getenv('PRODUCTION') == 'true'
+        is_production = render == 'true' or production == 'true'
         
         if is_production:
             # В production используем webhook
@@ -654,6 +688,7 @@ class TelegramBot:
         logger.info(f"🌐 Запуск бота в webhook режиме")
         logger.info(f"🔗 Webhook URL: {full_webhook_url}")
         logger.info(f"🔌 Port: {port}")
+        logger.info(f"📡 Ожидание входящих обновлений от Telegram...")
         
         try:
             application.run_webhook(
