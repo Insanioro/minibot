@@ -38,7 +38,8 @@ class TelegramBot:
             'daily_left': 0,
             'total_requests': 0,
             'total_approved': 0,
-            'total_left': 0
+            'total_left': 0,
+            'current_members': 0  # Текущее количество участников
         }
         
         # Загружаем сохраненную статистику
@@ -143,7 +144,8 @@ class TelegramBot:
             # Обновляем статистику одобренных для конкретного канала
             self.update_channel_stats(chat_id, 'total_approved')
             
-
+            # Обновляем счетчик участников
+            await self.update_members_count(context, chat_id)
             
         except Exception as e:
             logger.error(f"Ошибка при автоматическом одобрении заявки: {e}")
@@ -173,6 +175,9 @@ class TelegramBot:
             if user_id in self.approved_users:
                 await self.send_welcome_message(update, context, chat_member_update.new_chat_member.user)
                 self.approved_users.remove(user_id)  # Удаляем из списка после отправки приветствия
+                
+                # Обновляем счетчик участников при успешном вступлении
+                await self.update_members_count(context, chat_id)
         
         # Отслеживаем людей, покидающих группу
         elif (old_status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR] and 
@@ -184,6 +189,9 @@ class TelegramBot:
             self.update_channel_stats(chat_id, 'hourly_left')
             self.update_channel_stats(chat_id, 'daily_left')
             self.update_channel_stats(chat_id, 'total_left')
+            
+            # Обновляем счетчик участников
+            await self.update_members_count(context, chat_id)
             
             logger.info(f"Пользователь {chat_member_update.new_chat_member.user.first_name} ({user_id}) покинул чат '{chat_title}' ({chat_type})")
     
@@ -276,6 +284,8 @@ class TelegramBot:
                 'total_requests': 0,
                 'total_approved': 0,
                 'total_left': 0,
+                'current_members': 0,  # Текущее количество участников
+                'initial_members': 0,  # Количество участников при первом запуске
                 'last_activity': datetime.now()
             }
             logger.info(f"Создана статистика для канала '{chat_title}' ({chat_id})")
@@ -290,6 +300,45 @@ class TelegramBot:
             # Обновляем глобальную статистику
             if stat_type in self.global_stats:
                 self.global_stats[stat_type] += 1
+
+    async def update_members_count(self, context: ContextTypes.DEFAULT_TYPE, chat_id: str):
+        """Обновляет количество участников в канале/группе"""
+        try:
+            chat = await context.bot.get_chat(int(chat_id))
+            
+            # Получаем количество участников
+            if chat.type == ChatType.CHANNEL:
+                # Для каналов используем get_chat_member_count если доступно
+                try:
+                    member_count = await context.bot.get_chat_member_count(int(chat_id))
+                except Exception:
+                    # Если не удается получить точное количество, пропускаем
+                    return
+            elif chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+                try:
+                    member_count = await context.bot.get_chat_member_count(int(chat_id))
+                except Exception:
+                    # Если не удается получить количество, пропускаем
+                    return
+            else:
+                return
+            
+            # Обновляем статистику
+            if chat_id in self.channel_stats:
+                old_count = self.channel_stats[chat_id]['current_members']
+                self.channel_stats[chat_id]['current_members'] = member_count
+                
+                # Устанавливаем начальное количество если это первый раз
+                if self.channel_stats[chat_id]['initial_members'] == 0:
+                    self.channel_stats[chat_id]['initial_members'] = member_count
+                    logger.info(f"📊 Установлено начальное количество участников для '{chat.title}': {member_count}")
+                elif old_count != member_count:
+                    change = member_count - old_count
+                    change_emoji = "📈" if change > 0 else "📉" if change < 0 else "➖"
+                    logger.info(f"👥 Обновлено количество участников '{chat.title}': {old_count} → {member_count} ({change_emoji}{change:+d})")
+                    
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось обновить количество участников для {chat_id}: {e}")
 
 
 
@@ -319,11 +368,15 @@ class TelegramBot:
                 channel_growth = stats['hourly_requests'] - stats['hourly_left']
                 growth_emoji = "📈" if channel_growth > 0 else "📉" if channel_growth < 0 else "➖"
                 
+                members_info = ""
+                if stats.get('current_members', 0) > 0:
+                    members_info = f"\n  👥 Участников: {stats['current_members']}"
+                
                 channel_details.append(
                     f"🏷️ {stats['title'][:30]}:\n"
-                    f"  � Заявок: {stats['hourly_requests']}\n"
+                    f"  📝 Заявок: {stats['hourly_requests']}\n"
                     f"  👋 Покинули: {stats['hourly_left']}\n"
-                    f"  {growth_emoji} Прирост: {channel_growth}"
+                    f"  {growth_emoji} Прирост: {channel_growth}{members_info}"
                 )
         
         if channel_details:
@@ -373,12 +426,24 @@ class TelegramBot:
                 daily_emoji = "📈" if daily_growth > 0 else "📉" if daily_growth < 0 else "➖"
                 total_emoji = "📈" if total_growth > 0 else "📉" if total_growth < 0 else "➖"
                 
+                # Информация о подписчиках
+                members_info = ""
+                if stats.get('current_members', 0) > 0:
+                    initial = stats.get('initial_members', 0)
+                    current = stats['current_members']
+                    if initial > 0:
+                        growth_from_start = current - initial
+                        growth_emoji_total = "📈" if growth_from_start > 0 else "📉" if growth_from_start < 0 else "➖"
+                        members_info = f"\n  👥 Участников: {current} (старт: {initial}, {growth_emoji_total}{growth_from_start:+d})"
+                    else:
+                        members_info = f"\n  👥 Участников: {current}"
+                
                 channel_details.append(
                     f"🏷️ {stats['title'][:35]}:\n"
-                    f"  � За 8 часов: {stats['daily_requests']} заявок, {stats['daily_left']} покинули\n"
+                    f"  📝 За 8 часов: {stats['daily_requests']} заявок, {stats['daily_left']} покинули\n"
                     f"  {daily_emoji} Прирост за 8ч: {daily_growth}\n"
                     f"  📊 Всего: {stats['total_requests']} заявок, {stats['total_approved']} одобрено\n"
-                    f"  {total_emoji} Общий прирост: {total_growth}"
+                    f"  {total_emoji} Общий прирост: {total_growth}{members_info}"
                 )
         
         if channel_details:
@@ -497,6 +562,24 @@ class TelegramBot:
         """Периодически сохраняет статистику"""
         self.save_stats_to_file()
 
+    async def update_all_members_count(self, context: ContextTypes.DEFAULT_TYPE):
+        """Периодически обновляет счетчики участников для всех отслеживаемых каналов"""
+        logger.info("🔄 Обновление счетчиков участников...")
+        
+        updated_count = 0
+        for chat_id in list(self.tracked_groups):
+            try:
+                await self.update_members_count(context, chat_id)
+                updated_count += 1
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка обновления счетчика для {chat_id}: {e}")
+        
+        if updated_count > 0:
+            logger.info(f"✅ Обновлены счетчики для {updated_count} каналов")
+        
+        # Сохраняем обновленную статистику
+        self.save_stats_to_file()
+
     async def setup_periodic_tasks(self, context: ContextTypes.DEFAULT_TYPE):
         """Настраивает периодические задачи для статистики"""
         if context.job_queue is not None:
@@ -522,6 +605,14 @@ class TelegramBot:
                 interval=3600,  # каждые 60 минут
                 first=3600,     # первое сохранение через 60 минут
                 name="save_stats"
+            )
+            
+            # Периодическое обновление счетчиков участников
+            context.job_queue.run_repeating(
+                self.update_all_members_count,
+                interval=1800,  # каждые 30 минут
+                first=600,      # первое обновление через 10 минут после запуска
+                name="update_members"
             )
             
             logger.info("Настроены периодические задачи для статистики")
@@ -561,6 +652,7 @@ class TelegramBot:
         total_requests = sum(stats['total_requests'] for stats in self.channel_stats.values())
         total_approved = sum(stats['total_approved'] for stats in self.channel_stats.values())
         total_left = sum(stats['total_left'] for stats in self.channel_stats.values())
+        total_members = sum(stats.get('current_members', 0) for stats in self.channel_stats.values())
         
         message = (
             f"📊 Текущая статистика ({current_time}):\n\n"
@@ -568,8 +660,13 @@ class TelegramBot:
             f"📋 Всего заявок: {total_requests}\n"
             f"✅ Одобрено: {total_approved}\n"
             f"👋 Покинули: {total_left}\n"
-            f"🔄 Общий прирост: {total_requests - total_left}\n\n"
+            f"🔄 Общий прирост: {total_requests - total_left}\n"
         )
+        
+        if total_members > 0:
+            message += f"👥 Всего участников: {total_members}\n"
+        
+        message += "\n"
         
         # Статистика по каналам
         active_channels = [(chat_id, stats) for chat_id, stats in self.channel_stats.items() 
@@ -581,12 +678,25 @@ class TelegramBot:
                 growth = stats['total_requests'] - stats['total_left']
                 growth_emoji = "📈" if growth > 0 else "📉" if growth < 0 else "➖"
                 
+                # Информация о участниках
+                members_line = ""
+                if stats.get('current_members', 0) > 0:
+                    current = stats['current_members']
+                    initial = stats.get('initial_members', 0)
+                    if initial > 0 and initial != current:
+                        change = current - initial
+                        change_emoji = "📈" if change > 0 else "📉" if change < 0 else "➖"
+                        members_line = f"   👥 Участников: {current} ({change_emoji}{change:+d} от старта)\n"
+                    else:
+                        members_line = f"   👥 Участников: {current}\n"
+                
                 message += (
                     f"\n{i}. 🏷️ {stats['title'][:30]}:\n"
                     f"   📥 Заявок: {stats['total_requests']}\n"
                     f"   ✅ Одобрено: {stats['total_approved']}\n"
                     f"   👋 Покинули: {stats['total_left']}\n"
                     f"   {growth_emoji} Прирост: {growth}\n"
+                    f"{members_line}"
                 )
         
         try:
